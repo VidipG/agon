@@ -1,0 +1,59 @@
+openapi: "3.0.3"
+info:
+  title: Payment API
+  version: "1.0.0"
+  description: Handles payment processing for the platform.
+paths:
+  /payments:
+    post:
+      operationId: createPayment
+      summary: Process a new payment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PaymentRequest"
+      responses:
+        "200":
+          description: Payment approved
+        "400":
+          description: Invalid input
+        "401":
+          description: Unauthorized
+        "500":
+          description: Payment provider error
+  /payments/{id}:
+    get:
+      operationId: getPayment
+      summary: Retrieve a payment by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Payment found
+        "404":
+          description: Payment not found
+components:
+  schemas:
+    PaymentRequest:
+      type: object
+      required:
+        - amount
+        - currency
+        - token
+      properties:
+        amount:
+          type: integer
+          minimum: 1
+          description: Amount in smallest currency unit (cents)
+        currency:
+          type: string
+          enum: ["USD", "EUR", "GBP"]
+        token:
+          type: string
+          description: Payment token from tokenization service
