@@ -135,8 +135,8 @@ def _walk_functions(
 ) -> None:
     """Recursively walk tree-sitter nodes, extracting function_definition nodes."""
     for child in node.children:
-        if child.type in ("function_definition", "decorated_definition"):
-            fn_node = child if child.type == "function_definition" else _unwrap_decorated(child)
+        if child.type in ("function_definition", "async_function_definition", "decorated_definition"):
+            fn_node = child if child.type != "decorated_definition" else _unwrap_decorated(child)
             if fn_node is None:
                 continue
 
@@ -207,7 +207,7 @@ def _build_function_node(
     scope_prefix: str,
     is_method: bool,
 ) -> FunctionNode | None:
-    is_async = fn_node.type == "async_function_definition"
+    is_async = any(child.type == "async" for child in fn_node.children)
 
     name_node = _child_by_type(fn_node, "identifier")
     if name_node is None:
