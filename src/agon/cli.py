@@ -22,6 +22,8 @@ import typer
 from rich.console import Console
 from rich.panel import Panel
 
+from .models.schema import AgonReport
+from .pipeline import run as pipeline_run
 from .triggers.cli_trigger import CLITrigger
 
 app = typer.Typer(
@@ -222,11 +224,7 @@ def bootstrap(
 
 
 def _dispatch(request) -> None:  # noqa: ANN001
-    """Hand off a RunRequest to the pipeline engine.
-
-    This stub will be replaced by the real pipeline invocation in Phase 1.
-    For now it prints the parsed request so the CLI wiring can be verified.
-    """
+    """Dispatch a RunRequest to the pipeline engine and render the output."""
     if request.dry_run:
         console.print(Panel(
             f"[bold]Dry run — would execute:[/bold]\n"
@@ -239,15 +237,119 @@ def _dispatch(request) -> None:  # noqa: ANN001
         ))
         return
 
-    # TODO (Phase 1): replace with pipeline engine invocation
-    #   from .pipeline import Pipeline
-    #   from .config import load_config
-    #   cfg = load_config(request.config_path)
-    #   report = asyncio.run(Pipeline(cfg).run(request))
-    #   Renderer(request.output_format).render(report)
+    try:
+        report = pipeline_run(request)
+    except NotImplementedError as exc:
+        err_console.print(f"[yellow]{exc}[/yellow]")
+        raise typer.Exit(1) from exc
+    except Exception as exc:
+        err_console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(1) from exc
 
-    err_console.print(
-        "[yellow]Pipeline engine not yet implemented.[/yellow] "
-        "RunRequest parsed successfully:",
-        request.model_dump_json(indent=2),
-    )
+    _render(report, request.output_format)
+
+
+def _render(report: AgonReport, output_format: str) -> None:
+    """Render the report in the requested format."""
+    import json
+
+    if output_format == "json":
+        print(report.model_dump_json(indent=2))
+        return
+
+    if output_format == "sarif":
+        print(_to_sarif(report))
+        return
+
+    if output_format == "markdown":
+        _render_markdown(report)
+        return
+
+    # Default: terminal (Rich)
+    _render_terminal(report)
+
+
+def _render_terminal(report: AgonReport) -> None:
+    from rich.table import Table
+
+    s = report.summary
+    console.print(Panel(
+        f"[bold]Functions analyzed:[/bold] {s.functions_analyzed}\n"
+        f"[bold]Invariants inferred:[/bold] {s.invariants_inferred}\n"
+        f"[bold]By source:[/bold] {dict(s.invariants_by_source)}",
+        title="[cyan]agon — eigentest report[/cyan]",
+        border_style="cyan",
+    ))
+
+    if not report.invariants:
+        console.print("[dim]No invariants found.[/dim]")
+        return
+
+    table = Table(show_header=True, header_style="bold magenta")
+    table.add_column("Function", style="cyan", no_wrap=True)
+    table.add_column("Category", style="yellow")
+    table.add_column("Confidence", justify="right")
+    table.add_column("Property")
+
+    for inv in sorted(report.invariants, key=lambda i: (-i.confidence, i.function_refs[0].name)):
+        ref = inv.function_refs[0]
+        table.add_row(
+            ref.name,
+            inv.category.value,
+            f"{inv.confidence:.2f}",
+            inv.property[:80],
+        )
+
+    console.print(table)
+
+
+def _render_markdown(report: AgonReport) -> None:
+    s = report.summary
+    lines = [
+        "## Agon — Eigentest Report",
+        "",
+        f"| Metric | Value |",
+        f"|--------|-------|",
+        f"| Functions analyzed | {s.functions_analyzed} |",
+        f"| Invariants inferred | {s.invariants_inferred} |",
+        "",
+        "### Invariants",
+        "",
+        "| Function | Category | Confidence | Property |",
+        "|----------|----------|------------|----------|",
+    ]
+    for inv in report.invariants:
+        ref = inv.function_refs[0]
+        lines.append(
+            f"| `{ref.name}` | {inv.category.value} | {inv.confidence:.2f} | {inv.property[:60]} |"
+        )
+    console.print("\n".join(lines))
+
+
+def _to_sarif(report: AgonReport) -> str:
+    import json
+
+    results = []
+    for inv in report.invariants:
+        ref = inv.function_refs[0]
+        results.append({
+            "ruleId": f"agon/{inv.category.value}",
+            "message": {"text": inv.property},
+            "locations": [{
+                "physicalLocation": {
+                    "artifactLocation": {"uri": ref.file},
+                    "region": {"startLine": ref.line_start},
+                }
+            }],
+            "properties": {
+                "confidence": inv.confidence,
+                "source": inv.source.value,
+            },
+        })
+
+    sarif = {
+        "version": "2.1.0",
+        "$schema": "https://json.schemastore.org/sarif-2.1.0",
+        "runs": [{"tool": {"driver": {"name": "agon", "version": "0.1.0"}}, "results": results}],
+    }
+    return json.dumps(sarif, indent=2)
