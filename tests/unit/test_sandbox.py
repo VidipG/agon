@@ -24,35 +24,63 @@ from agon.sandbox.process import (
     SandboxResult,
     SandboxRunner,
     _classify,
+    _copy_sandbox,
     _extract_failing_tests,
-    _patched_file,
     select_tests,
 )
 from agon.adapters.base import TestResult
 
 
 # ---------------------------------------------------------------------------
-# _patched_file: context-manager correctness
+# _copy_sandbox: isolation correctness
 # ---------------------------------------------------------------------------
 
 
-class TestPatchedFile:
-    def test_restores_on_normal_exit(self, tmp_path: Path):
+class TestCopySandbox:
+    def test_original_never_modified(self, tmp_path: Path):
+        """The original source file must not be touched during sandbox execution."""
         f = tmp_path / "mod.py"
         original = "x = 1\n"
         f.write_text(original)
-        with _patched_file(f, "x = 999\n"):
-            assert f.read_text() == "x = 999\n"
-        assert f.read_text() == original
+        with _copy_sandbox(tmp_path, f, "x = 999\n"):
+            assert f.read_text() == original
 
-    def test_restores_on_exception(self, tmp_path: Path):
+    def test_mutated_content_in_copy(self, tmp_path: Path):
+        """The sandbox root must contain the mutated content at the correct path."""
+        f = tmp_path / "mod.py"
+        f.write_text("x = 1\n")
+        with _copy_sandbox(tmp_path, f, "x = 999\n") as sandbox_root:
+            assert (sandbox_root / "mod.py").read_text() == "x = 999\n"
+
+    def test_original_unchanged_on_exception(self, tmp_path: Path):
+        """Original must remain intact even if an exception is raised inside the block."""
         f = tmp_path / "mod.py"
         original = "x = 1\n"
         f.write_text(original)
         with pytest.raises(RuntimeError):
-            with _patched_file(f, "x = 999\n"):
+            with _copy_sandbox(tmp_path, f, "x = 999\n"):
                 raise RuntimeError("boom")
         assert f.read_text() == original
+
+    def test_sandbox_cleaned_up_after_exit(self, tmp_path: Path):
+        """Temp directory must be deleted after the context exits."""
+        f = tmp_path / "mod.py"
+        f.write_text("x = 1\n")
+        captured: list[Path] = []
+        with _copy_sandbox(tmp_path, f, "x = 999\n") as sandbox_root:
+            captured.append(sandbox_root)
+        assert not captured[0].exists()
+
+    def test_nested_path_preserved(self, tmp_path: Path):
+        """Mutated file at a nested path must land at the correct location in the copy."""
+        sub = tmp_path / "pkg"
+        sub.mkdir()
+        (sub / "__init__.py").write_text("")
+        f = sub / "utils.py"
+        f.write_text("x = 1\n")
+        with _copy_sandbox(tmp_path, f, "x = 42\n") as sandbox_root:
+            assert (sandbox_root / "pkg" / "utils.py").read_text() == "x = 42\n"
+            assert f.read_text() == "x = 1\n"  # original still intact
 
 
 # ---------------------------------------------------------------------------

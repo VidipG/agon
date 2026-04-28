@@ -43,6 +43,12 @@ _IO_CALL_NAMES = frozenset({
 class PythonAdapter:
     """LanguageAdapter implementation for Python (tree-sitter + pytest)."""
 
+    def source_extensions(self) -> tuple[str, ...]:
+        return (".py",)
+
+    def test_file_patterns(self) -> tuple[str, ...]:
+        return ("test_*.py", "*_test.py")
+
     def parse(self, source: str) -> Tree:
         return _PARSER.parse(source.encode("utf-8"))
 
@@ -60,6 +66,12 @@ class PythonAdapter:
             is_method=False,
         )
         return results
+
+    def extract_invariants(
+        self, func: FunctionNode, known_impure: frozenset[str] = frozenset()
+    ) -> list[Invariant]:
+        from ..eigentest import mechanical
+        return mechanical.extract(func, known_impure=known_impure)
 
     def apply_mutation(self, source: str, mutation: Mutation) -> str:
         loc = mutation.location
@@ -119,6 +131,7 @@ class PythonAdapter:
                 stderr=proc.stderr,
                 duration_ms=elapsed_ms,
                 killed_mutant=proc.returncode != 0,
+                timed_out=False,
             )
         except subprocess.TimeoutExpired:
             elapsed_ms = int((time.monotonic() - t0) * 1000)
@@ -126,6 +139,24 @@ class PythonAdapter:
                 passed=False,
                 stdout="",
                 stderr=f"Test runner timed out after {timeout_seconds:.0f}s",
+                duration_ms=elapsed_ms,
+                timed_out=True,
+            )
+
+    def collect_direct_call_names(self, func: FunctionNode) -> set[str]:
+        """Return the set of bare call names made directly in this function body.
+
+        Only the unqualified leaf name is returned (e.g. `helper` from
+        `self.helper(x)`, `log` from `logger.log()`). This is used by the
+        engine's transitive purity pass.
+        """
+        body = _child_by_type(func.node, "block")
+        if body is None:
+            return set()
+        names: set[str] = set()
+        _collect_calls_shallow(body, func.source_bytes, names)
+        return names
+
                 duration_ms=elapsed_ms,
                 killed_mutant=False,
                 timed_out=True,

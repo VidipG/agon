@@ -3,25 +3,33 @@ SandboxRunner — executes mutants in isolated subprocesses and classifies resul
 
 Execution strategy
 ------------------
-Phase 1 uses a "backup-and-restore" approach:
+Each mutant is executed in a temporary copy of the project.  The original
+source tree is **never modified**.
 
-  1. Read the original file into memory.
-  2. Apply the mutation (via LanguageAdapter.apply_mutation) and write it to disk.
-  3. Invoke the test runner via LanguageAdapter.run_tests.
-  4. Restore the original file — guaranteed via try/finally.
+  1. Copy the project root to a temp directory (Python sources + config only;
+     caches and virtual environments are excluded).
+  2. Write the mutated content to the copy of the target file.
+  3. Invoke the test runner from the temp root via LanguageAdapter.run_tests.
+  4. The temp directory is cleaned up by ``tempfile.TemporaryDirectory`` on exit.
 
-This avoids PYTHONPATH gymnastics and works reliably for any project layout.
-A PYTHONPATH-overlay variant is left as a Phase 2 enhancement.
+Why copy instead of PYTHONPATH overlay
+---------------------------------------
+pytest's default ``prepend`` import mode does ``sys.path.insert(0, rootdir)``
+at collection time.  Any PYTHONPATH entries we prepend would be pushed down to
+a lower priority before the first test module is imported, so the overlay would
+silently test the *original* code rather than the mutant.  Running from the
+project copy sidesteps this completely: pytest inserts the temp root, which
+already contains the mutated file.
 
 Safety guarantees
 -----------------
-* Zero-mutation baseline: tests are run on the ORIGINAL code before any mutations
-  start. If any baseline tests fail, the function is skipped entirely (its mutants
-  would be meaningless — a "survived" mutant could just be an already-broken test).
-* Cleanup on crash: try/finally in _apply_and_run ensures the original file is
-  always restored, even if pytest hangs and is killed by timeout.
-* Incremental output: each Mutation is yielded as soon as its status is known,
-  so the caller can flush partial results to disk.
+* Original files untouched: the mutation is written only to the temp copy.
+  A SIGKILL of the main agon process cannot corrupt the user's sources.
+* Zero-mutation baseline: tests are run on the ORIGINAL project_root before any
+  mutations start.  If baseline tests fail, all mutations for that function are
+  marked ``error`` and skipped.
+* Incremental output: each Mutation is returned as soon as its status is known,
+  so callers can flush partial results to disk.
 
 Test selection
 --------------
@@ -29,16 +37,17 @@ Test selection
   2. Grep each file for the function's leaf name.
   3. Run only the matching subset; fall back to the full test suite if nothing
      matches.
-  4. Cache the selection per (function_name, project_root) for the lifetime of
-     the runner instance.
+  4. Cache the selection per function name for the lifetime of the runner.
 """
 from __future__ import annotations
 
 import logging
+import shutil
+import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Generator, Iterator
+from typing import Generator
 
 from ..adapters.base import FunctionNode, LanguageAdapter, TestResult
 from ..config import AgonConfig
@@ -170,27 +179,23 @@ class SandboxRunner:
         test_files: list[str] | None,
         timeout: float,
     ) -> Mutation:
-        """Apply *mutation*, run tests, restore source, return Mutation with status."""
+        """Apply *mutation* in an isolated copy, run tests, return Mutation with status."""
         mutated_source = self._adapter.apply_mutation(func.source, mutation)
 
         if not source_file.exists():
             logger.warning("sandbox: source file missing: %s", source_file)
-            return mutation.model_copy(update={
-                "status": MutationStatus.error,
-            })
+            return mutation.model_copy(update={"status": MutationStatus.error})
 
         try:
-            with _patched_file(source_file, mutated_source):
+            with _copy_sandbox(project_root, source_file, mutated_source) as sandbox_root:
                 test_result = self._adapter.run_tests(
-                    project_root,
+                    sandbox_root,
                     test_filter=test_files,
                     timeout_seconds=timeout,
                 )
         except Exception as exc:  # noqa: BLE001
             logger.warning("sandbox: unexpected error running mutant %s: %s", mutation.id, exc)
-            return mutation.model_copy(update={
-                "status": MutationStatus.error,
-            })
+            return mutation.model_copy(update={"status": MutationStatus.error})
 
         return _classify(mutation, test_result)
 
@@ -360,20 +365,51 @@ def _extract_failing_tests(output: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Context manager: safe file patching
+# Context manager: isolated project copy
 # ---------------------------------------------------------------------------
 
 
-@contextmanager
-def _patched_file(path: Path, mutated_content: str) -> Generator[None, None, None]:
-    """Temporarily replace *path* with *mutated_content*, restoring on exit.
+_COPY_IGNORE = shutil.ignore_patterns(
+    "*.pyc",
+    "__pycache__",
+    ".git",
+    ".venv",
+    "venv",
+    "env",
+    ".tox",
+    "dist",
+    "build",
+    "*.egg-info",
+)
 
-    Restoration is guaranteed even if an exception is raised inside the block.
-    The backup is kept in memory (not on disk) to avoid leaving artifacts.
+
+@contextmanager
+def _copy_sandbox(
+    project_root: Path,
+    source_file: Path,
+    mutated_content: str,
+) -> Generator[Path, None, None]:
+    """Yield a temporary project root that contains *mutated_content* in place of *source_file*.
+
+    The original *source_file* is **never modified**.  The entire project tree
+    is copied (Python sources and config; caches and virtual environments are
+    excluded), the mutated content is written to the copy, and the temp root is
+    yielded.  ``tempfile.TemporaryDirectory`` ensures cleanup even if the main
+    process receives ``SIGKILL``.
+
+    Args:
+        project_root: Directory to copy.
+        source_file:  Absolute path of the file being mutated (must be under
+                      *project_root*).
+        mutated_content: New text for the copy of *source_file*.
+
+    Yields:
+        Path: Temporary project root; pass this to ``LanguageAdapter.run_tests``.
     """
-    original_bytes = path.read_bytes()
-    try:
-        path.write_text(mutated_content, encoding="utf-8")
-        yield
-    finally:
-        path.write_bytes(original_bytes)
+    rel = source_file.relative_to(project_root)
+
+    with tempfile.TemporaryDirectory(prefix="agon_mut_") as tmp:
+        sandbox_root = Path(tmp) / "project"
+        shutil.copytree(project_root, sandbox_root, ignore=_COPY_IGNORE, symlinks=False)
+        (sandbox_root / rel).write_text(mutated_content, encoding="utf-8")
+        yield sandbox_root

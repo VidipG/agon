@@ -64,7 +64,6 @@ class TestResult:
     timed_out: bool = False          # True if the test runner exceeded the timeout
     error_message: str | None = None # Non-None when status should be MutationStatus.error
 
-
 class LanguageAdapter(Protocol):
     """Single point of language-specific logic in Agon.
 
@@ -72,16 +71,31 @@ class LanguageAdapter(Protocol):
     tree-sitter, libCST, or any language-specific package directly.
     """
 
+    def source_extensions(self) -> tuple[str, ...]:
+        """Return the file extensions considered source code for this language."""
+        ...
+
+    def test_file_patterns(self) -> tuple[str, ...]:
+        """Return glob patterns (e.g. test_*.py) for discovering tests."""
+        ...
+
     def parse(self, source: str) -> Tree:
         """Parse source text into a tree-sitter Tree."""
         ...
 
     def get_functions(self, tree: Tree, file_path: str, source: str) -> list[FunctionNode]:
-        """Extract all function definitions from a parsed tree.
+        """Extract all function definitions from a parsed tree."""
+        ...
 
-        Recurses into nested functions. Names use dot-qualified form:
-          module.ClassName.method_name
-          module.outer_func.inner_func
+    def extract_invariants(
+        self, func: FunctionNode, known_impure: frozenset[str] = frozenset()
+    ) -> list[Invariant]:
+        """Run mechanical invariant extraction for this language.
+
+        Args:
+            func: The function to analyze.
+            known_impure: Names of same-file functions already determined to be
+                impure (for transitive purity checking).
         """
         ...
 
@@ -103,8 +117,9 @@ class LanguageAdapter(Protocol):
         self,
         project_root: Path,
         test_filter: list[str] | None = None,
-        timeout_seconds: float = 120,
-        extra_env: dict[str, str] | None = None,
+    ) -> TestResult:
+        """Run the test suite (or a subset) and return the result."""
+        ...
     ) -> TestResult:
         """Run the test suite (or a subset) and return the result.
 
