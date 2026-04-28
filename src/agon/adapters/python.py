@@ -88,30 +88,48 @@ class PythonAdapter:
         self,
         project_root: Path,
         test_filter: list[str] | None = None,
+        timeout_seconds: float = 120,
+        extra_env: dict[str, str] | None = None,
     ) -> TestResult:
+        import os
         import time
 
-        cmd = ["pytest", "--tb=no", "-q"]
+        cmd = ["pytest", "--tb=short", "-q"]
         if test_filter:
             cmd.extend(test_filter)
 
-        t0 = time.monotonic()
-        proc = subprocess.run(
-            cmd,
-            cwd=project_root,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        elapsed_ms = int((time.monotonic() - t0) * 1000)
+        env = os.environ.copy()
+        if extra_env:
+            env.update(extra_env)
 
-        return TestResult(
-            passed=proc.returncode == 0,
-            stdout=proc.stdout,
-            stderr=proc.stderr,
-            duration_ms=elapsed_ms,
-            killed_mutant=proc.returncode != 0,
-        )
+        t0 = time.monotonic()
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=project_root,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                env=env,
+            )
+            elapsed_ms = int((time.monotonic() - t0) * 1000)
+            return TestResult(
+                passed=proc.returncode == 0,
+                stdout=proc.stdout,
+                stderr=proc.stderr,
+                duration_ms=elapsed_ms,
+                killed_mutant=proc.returncode != 0,
+            )
+        except subprocess.TimeoutExpired:
+            elapsed_ms = int((time.monotonic() - t0) * 1000)
+            return TestResult(
+                passed=False,
+                stdout="",
+                stderr=f"Test runner timed out after {timeout_seconds:.0f}s",
+                duration_ms=elapsed_ms,
+                killed_mutant=False,
+                timed_out=True,
+            )
 
 
 # ---------------------------------------------------------------------------

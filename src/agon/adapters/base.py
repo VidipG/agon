@@ -60,7 +60,9 @@ class TestResult:
     stdout: str
     stderr: str
     duration_ms: int
-    killed_mutant: bool = False   # True if at least one test failed
+    killed_mutant: bool = False      # True if at least one test failed
+    timed_out: bool = False          # True if the test runner exceeded the timeout
+    error_message: str | None = None # Non-None when status should be MutationStatus.error
 
 
 class LanguageAdapter(Protocol):
@@ -101,6 +103,15 @@ class LanguageAdapter(Protocol):
         self,
         project_root: Path,
         test_filter: list[str] | None = None,
+        timeout_seconds: float = 120,
+        extra_env: dict[str, str] | None = None,
     ) -> TestResult:
-        """Run the test suite (or a subset) and return the result."""
+        """Run the test suite (or a subset) and return the result.
+
+        Args:
+            project_root: Directory to invoke the test runner from.
+            test_filter: If provided, restrict to these test paths/IDs.
+            timeout_seconds: Kill the runner after this many seconds.
+            extra_env: Additional environment variables merged into os.environ.
+        """
         ...

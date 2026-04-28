@@ -59,6 +59,20 @@ class PriorityConfig(BaseModel):
     ])
 
 
+class MutagenConfig(BaseModel):
+    max_mutants_per_function: int = 20
+    parallel_workers: int = 1  # Phase 1: serial; set >1 when sandbox is thread-safe
+    skip_equivalent_detection: bool = False
+    timeout_multiplier: float = 2.0
+    # Glob patterns for files to exclude from mutation (applied against FunctionRef.file)
+    skip_patterns: list[str] = Field(default_factory=lambda: [
+        "**/__pycache__/**",
+        "**/test_*.py",
+        "**/tests/**",
+        "**/conftest.py",
+    ])
+
+
 class SandboxConfig(BaseModel):
     backend: Literal["process", "container", "cloud"] = "process"
     timeout_multiplier: float = 2.0
@@ -91,6 +105,7 @@ class AgonConfig(BaseModel):
     models: ModelsConfig = Field(default_factory=ModelsConfig)
     cache: CacheConfig = Field(default_factory=CacheConfig)
     priority: PriorityConfig = Field(default_factory=PriorityConfig)
+    mutagen: MutagenConfig = Field(default_factory=MutagenConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
     ci: CIConfig = Field(default_factory=CIConfig)
