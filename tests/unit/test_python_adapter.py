@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import pytest
 from agon.adapters.python import PythonAdapter
+from agon.models.schema import InvariantCategory
 
 @pytest.fixture
 def adapter() -> PythonAdapter:
@@ -117,6 +118,48 @@ def func(a, b: int, c: str = "default", *args, **kwargs) -> float:
     assert params["c"] == "str"
 
     assert func.return_annotation == "float"
+
+
+def test_adapter_metadata(adapter: PythonAdapter):
+    """Verify the adapter provides correct discovery metadata."""
+    assert adapter.source_extensions() == (".py",)
+    assert "test_*.py" in adapter.test_file_patterns()
+    assert "*_test.py" in adapter.test_file_patterns()
+
+
+def test_adapter_extract_invariants(adapter: PythonAdapter):
+    """Verify that the adapter correctly delegates to the mechanical extractor."""
+    source = "def add(a: int, b: int) -> int: return a + b"
+    tree = adapter.parse(source)
+    func = adapter.get_functions(tree, "test.py", source)[0]
+    
+    invs = adapter.extract_invariants(func)
+    
+    # Check that we got invariants (type constraints from annotations)
+    categories = {inv.category for inv in invs}
+    assert InvariantCategory.precondition in categories
+    assert InvariantCategory.type_constraint in categories
+
+
+def test_adapter_collect_direct_call_names(adapter: PythonAdapter):
+    """Verify that the adapter can identify direct calls in a function body."""
+    source = """
+def main():
+    helper()
+    self.method()
+    obj.save(1, 2)
+    print("done")
+"""
+    tree = adapter.parse(source)
+    func = adapter.get_functions(tree, "test.py", source)[0]
+    
+    names = adapter.collect_direct_call_names(func)
+    
+    # Should find the leaf names of all calls
+    assert "helper" in names
+    assert "method" in names
+    assert "save" in names
+    assert "print" in names
 
 
 def test_async_method_in_class(adapter: PythonAdapter):

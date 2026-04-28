@@ -157,11 +157,6 @@ class PythonAdapter:
         _collect_calls_shallow(body, func.source_bytes, names)
         return names
 
-                duration_ms=elapsed_ms,
-                killed_mutant=False,
-                timed_out=True,
-            )
-
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -436,3 +431,17 @@ def _collect_test_assertions(
             ))
         else:
             _collect_test_assertions(child, source, src_bytes, test_file, results, current_test)
+
+
+def _collect_calls_shallow(node: Node, src_bytes: bytes, names: set[str]) -> None:
+    """Walk node collecting call names, but do not recurse into nested defs."""
+    for child in node.children:
+        if child.type in ("function_definition", "async_function_definition"):
+            # Calls inside nested functions belong to them, not the outer one
+            continue
+        if child.type == "call":
+            call_text = src_bytes[child.start_byte: child.end_byte].decode("utf-8", errors="replace")
+            leaf = call_text.split("(")[0].rsplit(".", 1)[-1].strip()
+            if leaf.isidentifier():
+                names.add(leaf)
+        _collect_calls_shallow(child, src_bytes, names)

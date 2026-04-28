@@ -356,40 +356,6 @@ def _find_enclosing_condition(func: FunctionNode, raise_node: Node) -> str | Non
 # ---------------------------------------------------------------------------
 
 
-def collect_direct_call_names(func: FunctionNode) -> set[str]:
-    """Return the set of bare call names made directly in this function body.
-
-    Only the unqualified leaf name is returned (e.g. `helper` from
-    `self.helper(x)`, `log` from `logger.log()`).  This is used by the
-    engine's transitive purity pass: if any called name matches a known-impure
-    function in the same file, the caller can be downgraded.
-
-    Only direct (non-nested-function) calls are collected; calls inside inner
-    function definitions are attributed to those inner functions, not the outer
-    one.
-    """
-    body = _child_by_type(func.node, "block")
-    if body is None:
-        return set()
-    names: set[str] = set()
-    _collect_calls_shallow(body, func.source_bytes, names)
-    return names
-
-
-def _collect_calls_shallow(node: Node, src_bytes: bytes, names: set[str]) -> None:
-    """Walk node collecting call names, but do not recurse into nested defs."""
-    for child in node.children:
-        if child.type in ("function_definition", "async_function_definition"):
-            # Calls inside nested functions belong to them, not the outer one
-            continue
-        if child.type == "call":
-            call_text = src_bytes[child.start_byte: child.end_byte].decode("utf-8", errors="replace")
-            leaf = call_text.split("(")[0].rsplit(".", 1)[-1].strip()
-            if leaf.isidentifier():
-                names.add(leaf)
-        _collect_calls_shallow(child, src_bytes, names)
-
-
 def _extract_purity_invariant(
     func: FunctionNode,
     known_impure: frozenset[str] = frozenset(),

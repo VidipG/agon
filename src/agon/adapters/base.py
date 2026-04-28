@@ -13,7 +13,7 @@ from typing import Protocol
 
 from tree_sitter import Node, Tree
 
-from ..models.schema import FunctionRef, Mutation
+from ..models.schema import FunctionRef, Invariant, Mutation
 
 
 @dataclass
@@ -63,6 +63,7 @@ class TestResult:
     killed_mutant: bool = False      # True if at least one test failed
     timed_out: bool = False          # True if the test runner exceeded the timeout
     error_message: str | None = None # Non-None when status should be MutationStatus.error
+
 
 class LanguageAdapter(Protocol):
     """Single point of language-specific logic in Agon.
@@ -117,9 +118,8 @@ class LanguageAdapter(Protocol):
         self,
         project_root: Path,
         test_filter: list[str] | None = None,
-    ) -> TestResult:
-        """Run the test suite (or a subset) and return the result."""
-        ...
+        timeout_seconds: float = 120,
+        extra_env: dict[str, str] | None = None,
     ) -> TestResult:
         """Run the test suite (or a subset) and return the result.
 
