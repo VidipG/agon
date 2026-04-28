@@ -240,18 +240,27 @@ Because pytest inserts `sandbox_root`-relative paths at position 0, and the edit
 
 ### 4.3 Excluded Paths
 
-`_COPY_IGNORE` excludes the following patterns from the copy:
+`_copy_sandbox` uses `adapter.sandbox_ignore_patterns()` to determine which files to exclude from the copy. For Python, this includes standard patterns like `__pycache__` and `.venv`. For other languages like TypeScript, this would include `node_modules` (which should be symlinked rather than copied, as discussed in Section 4.7).
 
 | Pattern | Reason |
 |---|---|
-| `*.pyc` | Compiled bytecodes would be stale (different path) and could shadow the `.py` file under some import conditions |
-| `__pycache__` | Same as above; avoids stale `__pycache__` from the original tree shadowing fresh imports |
-| `.git` | git metadata is not needed for test execution and adds 10–100 MB to the copy on large repos |
-| `.venv`, `venv`, `env` | Virtual environments contain the Python interpreter and all installed packages; copying them would be gigabytes and is not needed — the subprocess inherits the parent's PATH and VIRTUAL_ENV |
-| `.tox` | tox environments, same rationale as virtual environments |
-| `dist`, `build`, `*.egg-info` | Build artifacts; not needed for test execution and may confuse pytest's rootdir detection |
+| `*.pyc`, `__pycache__` | Compiled bytecodes would be stale and could shadow fresh source. |
+| `.git` | git metadata is not needed and adds significant size. |
+| `.venv`, `venv`, `env`, `node_modules` | Large environment/dependency folders that should not be copied. |
+| `dist`, `build` | Build artifacts; not needed for test execution. |
 
-The absence of `*.pyc` files forces Python to recompile `.py` sources at import time for each mutant run. This adds approximately 20–50ms for small-to-medium projects and is unavoidable without introducing bytecode invalidation complexity.
+---
+
+### 4.7 Multi-Language Support
+
+The `SandboxRunner` is designed to be language-agnostic by delegating language-specific logic to a `LanguageAdapter`:
+
+1.  **Test Discovery:** The `select_tests` helper uses `adapter.test_file_patterns()` to find relevant test files (e.g., `test_*.py` for Python, `*.test.ts` for TypeScript).
+2.  **Sandbox Isolation:** The `_copy_sandbox` context manager uses `adapter.sandbox_ignore_patterns()` to exclude unnecessary files.
+3.  **Dependency Handling (Future):** For languages with heavy dependency folders (like TypeScript's `node_modules`), the adapter will eventually handle symlinking the original folder into the sandbox root to avoid massive copy overhead while maintaining import resolution.
+4.  **Test Execution:** All test runs are performed via `adapter.run_tests()`, which encapsulates the specific test runner command (e.g., `pytest`, `jest`, `vitest`).
+
+This abstraction allows Agon to support new languages by simply implementing a new `LanguageAdapter`, without changing the core execution and isolation logic.
 
 ### 4.4 Source Integrity Guarantee
 

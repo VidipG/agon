@@ -42,14 +42,16 @@ class TestCopySandbox:
         f = tmp_path / "mod.py"
         original = "x = 1\n"
         f.write_text(original)
-        with _copy_sandbox(tmp_path, f, "x = 999\n"):
+        adapter = PythonAdapter()
+        with _copy_sandbox(tmp_path, f, "x = 999\n", adapter):
             assert f.read_text() == original
 
     def test_mutated_content_in_copy(self, tmp_path: Path):
         """The sandbox root must contain the mutated content at the correct path."""
         f = tmp_path / "mod.py"
         f.write_text("x = 1\n")
-        with _copy_sandbox(tmp_path, f, "x = 999\n") as sandbox_root:
+        adapter = PythonAdapter()
+        with _copy_sandbox(tmp_path, f, "x = 999\n", adapter) as sandbox_root:
             assert (sandbox_root / "mod.py").read_text() == "x = 999\n"
 
     def test_original_unchanged_on_exception(self, tmp_path: Path):
@@ -57,8 +59,9 @@ class TestCopySandbox:
         f = tmp_path / "mod.py"
         original = "x = 1\n"
         f.write_text(original)
+        adapter = PythonAdapter()
         with pytest.raises(RuntimeError):
-            with _copy_sandbox(tmp_path, f, "x = 999\n"):
+            with _copy_sandbox(tmp_path, f, "x = 999\n", adapter):
                 raise RuntimeError("boom")
         assert f.read_text() == original
 
@@ -67,7 +70,8 @@ class TestCopySandbox:
         f = tmp_path / "mod.py"
         f.write_text("x = 1\n")
         captured: list[Path] = []
-        with _copy_sandbox(tmp_path, f, "x = 999\n") as sandbox_root:
+        adapter = PythonAdapter()
+        with _copy_sandbox(tmp_path, f, "x = 999\n", adapter) as sandbox_root:
             captured.append(sandbox_root)
         assert not captured[0].exists()
 
@@ -78,7 +82,8 @@ class TestCopySandbox:
         (sub / "__init__.py").write_text("")
         f = sub / "utils.py"
         f.write_text("x = 1\n")
-        with _copy_sandbox(tmp_path, f, "x = 42\n") as sandbox_root:
+        adapter = PythonAdapter()
+        with _copy_sandbox(tmp_path, f, "x = 42\n", adapter) as sandbox_root:
             assert (sandbox_root / "pkg" / "utils.py").read_text() == "x = 42\n"
             assert f.read_text() == "x = 1\n"  # original still intact
 
@@ -167,7 +172,7 @@ class TestSelectTests:
         adapter = PythonAdapter()
         tree = adapter.parse("def my_func(x):\n    return x + 1\n")
         funcs = adapter.get_functions(tree, "lib.py", "def my_func(x):\n    return x + 1\n")
-        result = select_tests(funcs[0], tmp_path)
+        result = select_tests(funcs[0], tmp_path, adapter)
         assert result is not None
         assert any("test_lib.py" in f for f in result)
 
@@ -181,7 +186,7 @@ class TestSelectTests:
             adapter.parse("def my_func(x):\n    return x + 1\n"),
             "lib.py", "def my_func(x):\n    return x + 1\n"
         )
-        result = select_tests(funcs[0], tmp_path)
+        result = select_tests(funcs[0], tmp_path, adapter)
         assert result is None
 
     def test_source_file_itself_excluded(self, tmp_path: Path):
@@ -190,7 +195,7 @@ class TestSelectTests:
         (tmp_path / "test_lib.py").write_text(src)
         adapter = PythonAdapter()
         funcs = adapter.get_functions(adapter.parse(src), "test_lib.py", src)
-        result = select_tests(funcs[0], tmp_path)
+        result = select_tests(funcs[0], tmp_path, adapter)
         # test_lib.py IS a test file but it's also the source — should not be
         # selected against itself as a separate test runner target
         if result:

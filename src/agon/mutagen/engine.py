@@ -21,7 +21,6 @@ import logging
 from dataclasses import dataclass, field
 
 from ..adapters.base import FunctionNode, LanguageAdapter
-from ..adapters.python_mutator import collect_mutations, site_to_mutation
 from ..config import AgonConfig
 from ..models.schema import (
     Invariant,
@@ -168,41 +167,44 @@ class MutagenEngine:
         result: MutagenResult,
         seen_global: set[tuple[str, int, int, int, str]],
     ) -> None:
-        sites = collect_mutations(func)
+        mutations = self._adapter.collect_mutations(func)
 
-        if not sites:
+        if not mutations:
             result.functions_skipped.append(func.ref.name)
             return
 
         # Cap per-function count; keep deterministic order (stable sort by line/col)
-        sites = sorted(sites, key=lambda s: (s.line, s.col_start))[:max_mutants]
+        # We sort the list of Mutation objects by their location
+        mutations = sorted(
+            mutations, 
+            key=lambda m: (m.location.line, m.location.col_start)
+        )[:max_mutants]
 
         added = 0
-        for site in sites:
+        for m in mutations:
             dedup_key = (
                 func.ref.file,
-                site.line,
-                site.col_start,
-                site.col_end,
-                site.mutated,
+                m.location.line,
+                m.location.col_start,
+                m.location.col_end,
+                m.mutated_code,
             )
             if dedup_key in seen_global:
                 continue
             seen_global.add(dedup_key)
 
-            mutation = site_to_mutation(site, func)
-            mutation = _link_invariants(mutation, func_invariants)
-            result.mutations.append(mutation)
+            m = _link_invariants(m, func_invariants)
+            result.mutations.append(m)
             added += 1
 
         if added == 0:
             result.functions_skipped.append(func.ref.name)
         else:
             logger.debug(
-                "mutagen: %s → %d mutations (%d sites before cap/dedup)",
+                "mutagen: %s → %d mutations (%d before cap/dedup)",
                 func.ref.name,
                 added,
-                len(sites),
+                len(mutations),
             )
 
 

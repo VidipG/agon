@@ -49,6 +49,20 @@ class PythonAdapter:
     def test_file_patterns(self) -> tuple[str, ...]:
         return ("test_*.py", "*_test.py")
 
+    def sandbox_ignore_patterns(self) -> tuple[str, ...]:
+        return (
+            "*.pyc",
+            "__pycache__",
+            ".git",
+            ".venv",
+            "venv",
+            "env",
+            ".tox",
+            "dist",
+            "build",
+            "*.egg-info",
+        )
+
     def parse(self, source: str) -> Tree:
         return _PARSER.parse(source.encode("utf-8"))
 
@@ -72,6 +86,11 @@ class PythonAdapter:
     ) -> list[Invariant]:
         from ..eigentest import mechanical
         return mechanical.extract(func, known_impure=known_impure)
+
+    def collect_mutations(self, func: FunctionNode) -> list[Mutation]:
+        from .python_mutator import collect_mutations, site_to_mutation
+        sites = collect_mutations(func)
+        return [site_to_mutation(s, func) for s in sites]
 
     def apply_mutation(self, source: str, mutation: Mutation) -> str:
         loc = mutation.location

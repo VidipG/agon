@@ -19,6 +19,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .adapters.base import LanguageAdapter
+from .adapters.factory import resolve_adapter
 from .config import AgonConfig, load_config
 from .eigentest.engine import EigentestEngine, EigentestResult
 from .models.schema import AgonReport, Mutation, MutationStatus, ReportSummary
@@ -28,7 +29,7 @@ from .triggers.base import RunRequest
 def run(request: RunRequest) -> AgonReport:
     """Execute the pipeline for the given RunRequest and return a report."""
     cfg = load_config(request.config_path)
-    adapter = _resolve_adapter(cfg)
+    adapter = resolve_adapter(cfg)
     project_root = detect_project_root(request.scope.paths)
 
     if request.mode in ("eigentest", "bootstrap"):
@@ -41,18 +42,6 @@ def run(request: RunRequest) -> AgonReport:
     raise NotImplementedError(
         f"Mode '{request.mode}' is not yet implemented. "
         "Available: eigentest, mutagen, analyze, diff, bootstrap"
-    )
-
-
-def _resolve_adapter(cfg: AgonConfig) -> LanguageAdapter:
-    """Instantiate the correct LanguageAdapter for the configured language."""
-    language = cfg.general.language.lower()
-    if language == "python":
-        from .adapters.python import PythonAdapter
-        return PythonAdapter()
-    raise ValueError(
-        f"Unsupported language: {language!r}. "
-        "Supported languages: python"
     )
 
 

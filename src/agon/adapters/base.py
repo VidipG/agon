@@ -80,6 +80,13 @@ class LanguageAdapter(Protocol):
         """Return glob patterns (e.g. test_*.py) for discovering tests."""
         ...
 
+    def sandbox_ignore_patterns(self) -> tuple[str, ...]:
+        """Return glob patterns for files/directories to exclude from sandbox copy.
+        
+        Examples: .venv, __pycache__, node_modules.
+        """
+        ...
+
     def parse(self, source: str) -> Tree:
         """Parse source text into a tree-sitter Tree."""
         ...
@@ -91,12 +98,13 @@ class LanguageAdapter(Protocol):
     def extract_invariants(
         self, func: FunctionNode, known_impure: frozenset[str] = frozenset()
     ) -> list[Invariant]:
-        """Run mechanical invariant extraction for this language.
+        """Run mechanical invariant extraction for this language."""
+        ...
 
-        Args:
-            func: The function to analyze.
-            known_impure: Names of same-file functions already determined to be
-                impure (for transitive purity checking).
+    def collect_mutations(self, func: FunctionNode) -> list[Mutation]:
+        """Generate all possible mechanical mutations for the given function.
+        
+        Returns a list of Mutation objects in PENDING status.
         """
         ...
 

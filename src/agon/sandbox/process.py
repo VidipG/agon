@@ -187,7 +187,7 @@ class SandboxRunner:
             return mutation.model_copy(update={"status": MutationStatus.error})
 
         try:
-            with _copy_sandbox(project_root, source_file, mutated_source) as sandbox_root:
+            with _copy_sandbox(project_root, source_file, mutated_source, self._adapter) as sandbox_root:
                 test_result = self._adapter.run_tests(
                     sandbox_root,
                     test_filter=test_files,
@@ -246,7 +246,7 @@ class SandboxRunner:
         if cache_key in self._test_selection_cache:
             return self._test_selection_cache[cache_key]
 
-        selection = select_tests(func, project_root)
+        selection = select_tests(func, project_root, self._adapter)
         self._test_selection_cache[cache_key] = selection
         return selection
 
@@ -262,11 +262,15 @@ class SandboxRunner:
 # ---------------------------------------------------------------------------
 
 
-def select_tests(func: FunctionNode, project_root: Path) -> list[str] | None:
+def select_tests(
+    func: FunctionNode, 
+    project_root: Path, 
+    adapter: LanguageAdapter,
+) -> list[str] | None:
     """Identify test files that exercise *func*.
 
     Strategy (in order):
-    1. Collect all test_*.py and *_test.py under project_root.
+    1. Collect all test files using patterns from the adapter.
     2. Return those whose text contains the function's leaf name as a token.
     3. If nothing matches, return None (caller should use the full suite).
 
@@ -274,10 +278,12 @@ def select_tests(func: FunctionNode, project_root: Path) -> list[str] | None:
     selection (pytest --cov) for a 10-100x speedup on large projects.
     """
     leaf_name = func.ref.name.split(".")[-1]
+    patterns = adapter.test_file_patterns()
 
-    test_files: list[Path] = sorted(
-        list(project_root.rglob("test_*.py")) + list(project_root.rglob("*_test.py"))
-    )
+    test_files: list[Path] = []
+    for pattern in patterns:
+        test_files.extend(project_root.rglob(pattern))
+    test_files.sort()
 
     # Exclude the source file itself (it's not a test file)
     source_abs = (project_root / func.ref.file).resolve()
@@ -369,47 +375,34 @@ def _extract_failing_tests(output: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-_COPY_IGNORE = shutil.ignore_patterns(
-    "*.pyc",
-    "__pycache__",
-    ".git",
-    ".venv",
-    "venv",
-    "env",
-    ".tox",
-    "dist",
-    "build",
-    "*.egg-info",
-)
-
-
 @contextmanager
 def _copy_sandbox(
     project_root: Path,
     source_file: Path,
     mutated_content: str,
+    adapter: LanguageAdapter,
 ) -> Generator[Path, None, None]:
     """Yield a temporary project root that contains *mutated_content* in place of *source_file*.
 
-    The original *source_file* is **never modified**.  The entire project tree
-    is copied (Python sources and config; caches and virtual environments are
-    excluded), the mutated content is written to the copy, and the temp root is
-    yielded.  ``tempfile.TemporaryDirectory`` ensures cleanup even if the main
-    process receives ``SIGKILL``.
+    The original *source_file* is **never modified**. The entire project tree
+    is copied, using language-specific ignore patterns from the adapter.
+    The mutated content is written to the copy, and the temp root is
+    yielded. ``tempfile.TemporaryDirectory`` ensures cleanup.
 
     Args:
         project_root: Directory to copy.
-        source_file:  Absolute path of the file being mutated (must be under
-                      *project_root*).
+        source_file:  Absolute path of the file being mutated.
         mutated_content: New text for the copy of *source_file*.
+        adapter: LanguageAdapter providing ignore patterns.
 
     Yields:
-        Path: Temporary project root; pass this to ``LanguageAdapter.run_tests``.
+        Path: Temporary project root.
     """
     rel = source_file.relative_to(project_root)
+    ignore = shutil.ignore_patterns(*adapter.sandbox_ignore_patterns())
 
     with tempfile.TemporaryDirectory(prefix="agon_mut_") as tmp:
         sandbox_root = Path(tmp) / "project"
-        shutil.copytree(project_root, sandbox_root, ignore=_COPY_IGNORE, symlinks=False)
+        shutil.copytree(project_root, sandbox_root, ignore=ignore, symlinks=False)
         (sandbox_root / rel).write_text(mutated_content, encoding="utf-8")
         yield sandbox_root
