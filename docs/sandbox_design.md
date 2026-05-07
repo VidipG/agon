@@ -311,6 +311,18 @@ For large projects (>1000 source files), copy overhead becomes significant relat
 
 **No parallelism in Phase 1:** `MutagenConfig.parallel_workers` is set to 1. The copy sandbox is safe for parallel execution (each mutant gets an independent temp directory), but the current implementation is serial. Parallelism is deferred until the test runner is instrumented to report results incrementally rather than buffering all output.
 
+**Incremental filter — skip sandbox for unchanged functions:** When a prior `AgonReport` is available (via `--cache <report.json>`), `incremental_filter` compares each current `FunctionNode`'s `(file, name, content_hash)` against the function refs embedded in prior mutations. Functions whose body has not changed since the prior run bypass the sandbox entirely — their prior mutation results are carried over as-is. Only changed or newly added functions go through `_copy_sandbox`.
+
+For a project with 100 functions where 10 changed, this reduces sandbox invocations by 90%. The performance model becomes:
+
+```
+total_time ≈ (changed_functions * avg_mutants_per_function * copy_overhead)
+           + (changed_functions * avg_mutants_per_function * test_execution_time)
+           + O(1) incremental_filter overhead
+```
+
+The `content_hash` is `sha256(function_body)`. It is stable across line number shifts (adding lines before the function does not invalidate the cache) and sensitive to any body change, including whitespace-only edits. The cache is invalid — and the full analysis re-runs — if `content_hash` changes for any reason, including formatting, refactoring, or logic changes. This is intentionally conservative: a stale cache producing incorrect survival status is worse than an unnecessary re-run.
+
 ---
 
 ## 6. Known Limitations
@@ -327,18 +339,49 @@ For large projects (>1000 source files), copy overhead becomes significant relat
 
 ## 7. Configuration
 
-The sandbox backend is selected via `AgonConfig.sandbox.backend`:
-
 ```toml
 [sandbox]
 backend = "process"   # current; "container" and "cloud" are reserved
+
+[mutagen]
+parallel_workers = 1           # set >1 to enable concurrent sandbox execution
+timeout_multiplier = 2.0       # per-mutant timeout = general.timeout_seconds * this
+
+[general]
+timeout_seconds = 30           # baseline test timeout; mutant timeout = 30 * 2.0 = 60s
 ```
 
-Per-mutant timeout is computed from `GeneralConfig.timeout_seconds * MutagenConfig.timeout_multiplier`. The default is `30s * 2.0 = 60s`. A test that produces an infinite loop under mutation will be killed after 60 seconds and classified as `timeout`, not `killed` or `survived`.
+**Timeout:** Per-mutant timeout is `general.timeout_seconds × mutagen.timeout_multiplier`. Default is 60s. A test that produces an infinite loop under mutation is killed after the timeout and classified as `timeout`, not `killed` or `survived`.
+
+**Parallelism:** `parallel_workers` controls the `ThreadPoolExecutor` pool size. Each worker gets its own `TemporaryDirectory`; no shared filesystem state exists between workers. `workers=1` bypasses the executor entirely and uses the original serial loop (no threading overhead). Recommended values: match `parallel_workers` to the number of available CPU cores for subprocess-heavy workloads; the GIL is released during `subprocess.run` so threads scale well.
 
 ---
 
-## 8. Planned Evolution
+## 8. Pipeline Integration
+
+The sandbox runner sits at Phase 4 of the pipeline. The full execution flow for `mutagen`, `analyze`, `diff`, and `spectre` modes is:
+
+```
+Phase 1: EigentestEngine    → FunctionNode list + Invariant list
+           (mechanical AST extraction; LLM augmentation in Phase 2A)
+Phase 2: MutagenEngine      → Mutation list (status=pending)
+           (mechanical Tier 1 operators; LLM Tier 2 operators in Phase 2B)
+Phase 3: incremental_filter → partitions Mutations into (to_run, carried_over)
+Phase 4: SandboxRunner      → executes to_run concurrently (parallel_workers)
+           each Mutation gets status=killed|survived|timeout|error
+           (equivalence detection via LLM in Phase 2C: survived → equivalent)
+Phase 5: SpectreEngine      → for each survived Mutation, produces a Counterexample
+           (mechanical: pytest stub template, input=None)
+           (Phase 3: LLM input synthesis + dynamic execution, concrete values)
+```
+
+`SandboxRunner.run()` receives only the `to_run` subset from the incremental filter. The `carried_over` mutations are merged back with the sandbox results downstream, before the report is built. This means the sandbox has no awareness of the cache — it always runs to completion for the mutations it receives.
+
+**Diff mode scoping** (agon `diff` command): Before Phase 1, the pipeline narrows `EigentestEngine`'s path list to only files changed since the base git ref (`git diff --name-only --diff-filter=ACMRT <base>...HEAD`). Unchanged files are not parsed, which reduces eigentest and mutagen work before the sandbox is reached. The incremental filter applies on top of this: if a changed file contains both changed and unchanged functions, only the changed functions proceed through the sandbox.
+
+---
+
+## 9. Planned Evolution
 
 **Phase 2 — LLM-generated mutations:** When mutations are generated by a language model rather than mechanical operator substitution, the mutated code may contain arbitrary Python, including `import os; os.system(...)`. The project copy approach still prevents source corruption, but does not prevent the subprocess from executing side effects. The planned response is an optional OS-native restriction layer:
 
@@ -350,3 +393,81 @@ This is implemented as an additional wrapper around `subprocess.run` within `Pyt
 **Selective copy:** Replace full `copytree` with a targeted copy of only the import-reachable files from the relevant test file. Requires static import graph analysis (likely using `modulefinder` or `importlib.util.find_spec` traversal) and caching the graph across mutant runs for the same function.
 
 **Coverage-guided test selection:** Use `pytest --cov-report=json` to identify which test lines execute the specific lines being mutated. This replaces the current token-presence heuristic and reduces false-negative test selections. Combined with selective copy, this provides the 10–100x speedup described in the Phase 1 plan for large projects.
+
+**SpectreEngine Phase 3 — dynamic counterexample synthesis:** The current `SpectreEngine` produces pytest test stubs with `input=None`. Phase 3 will add LLM-powered input generation: given the function signature and the surviving mutation, the LLM proposes concrete inputs; agon executes both the original and the mutant and records the concrete `input`, `expected`, `actual`, and `mutant_output` values in the `Counterexample`. The resulting reproducer will be a fully self-contained, copy-pasteable pytest test that fails on the original code and passes on the mutant.
+
+---
+
+## 10. User-Facing CLI Reference
+
+### Commands
+
+| Command | What it runs |
+|---------|-------------|
+| `agon analyze <path>` | Full pipeline: eigentest → mutagen → sandbox → spectre |
+| `agon mutagen <path>` | Same as analyze (produces counterexamples) |
+| `agon diff [<path>]` | Same as analyze, but scoped to files changed since last commit |
+| `agon eigentest <path>` | Invariant inference only (no mutations, no sandbox) |
+| `agon spectre <path>` | Full pipeline (alias for analyze; spectre branding) |
+| `agon bootstrap <path>` | Invariant baseline for unannotated code |
+
+### Flags that affect sandbox and pipeline behavior
+
+```
+--save <path.json>        Persist the AgonReport to disk after the run.
+                          Enables --cache on the next run.
+
+--cache <path.json>       Load a prior AgonReport to activate the incremental
+                          filter. Functions whose body hash matches the prior
+                          report skip the sandbox entirely.
+
+--fail-under <0.0–1.0>   Exit 1 if the mutation score is below this threshold.
+                          Has no effect on eigentest-only runs (no mutations).
+
+--base <git-ref>          (diff only) Base git ref for changed-file detection.
+                          Defaults to staged+unstaged changes vs HEAD.
+
+--dry-run                 Print what would be analyzed without executing.
+```
+
+### CI workflow pattern
+
+```bash
+# First run — full analysis, save report
+agon analyze src/ --save .agon/report.json --fail-under 0.80
+
+# Subsequent runs — incremental (only changed functions re-run)
+agon analyze src/ \
+  --cache .agon/report.json \
+  --save  .agon/report.json \
+  --fail-under 0.80
+
+# PR-scoped — only analyze functions changed on this branch
+agon diff --base main \
+  --cache .agon/report.json \
+  --save  .agon/report.json \
+  --fail-under 0.80
+```
+
+### Exit codes
+
+| Code | Condition |
+|------|-----------|
+| `0` | All CI gates passed (or no gates configured) |
+| `1` | Mutation score below `--fail-under`, **or** one or more counterexamples have severity matching `ci.fail_on` (default: `critical`, `high`) |
+| `1` | Pipeline error (unhandled exception, unimplemented mode) |
+
+The `ci.fail_on` severity gate is configured in `.agon/config.toml`:
+
+```toml
+[ci]
+fail_on = ["critical", "high"]   # default; add "medium" for stricter CI
+```
+
+Severities are assigned by `SpectreEngine` based on the mutation operator:
+
+| Severity | Operators |
+|----------|-----------|
+| `high` | `exception_swallow`, `comparison_boundary`, `condition_negate`, `arithmetic_swap` |
+| `medium` | `boolean_negate`, `return_value_replace`, `statement_delete` |
+| `low` | `constant_replace` |

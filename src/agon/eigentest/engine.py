@@ -10,11 +10,13 @@ Entry point:
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from ..adapters.base import FunctionNode, LanguageAdapter
 from ..models.schema import FunctionRef, Invariant
-from . import mechanical
+
+logger = logging.getLogger(__name__)
 
 
 class EigentestResult:
@@ -82,7 +84,15 @@ class EigentestEngine:
                 try:
                     rel = src_file.relative_to(root)
                 except ValueError:
-                    rel = src_file
+                    try:
+                        rel = src_file.relative_to(Path.cwd())
+                    except ValueError:
+                        logger.warning(
+                            "eigentest: %s is outside project root %s and cwd — "
+                            "using absolute path as file key",
+                            src_file, root,
+                        )
+                        rel = src_file
                 funcs = self._adapter.get_functions(tree, str(rel), source)
                 all_functions.extend(funcs)
 
@@ -136,8 +146,10 @@ class EigentestEngine:
                     continue
                 # Tentatively extract with current known_impure set
                 invs = self._adapter.extract_invariants(func, known_impure=frozenset(known_impure))
+                from ..models.schema import InvariantCategory
                 has_purity = any(
-                    inv.category.value == "purity" and "appears to be pure" in inv.property
+                    inv.category == InvariantCategory.purity
+                    and "appears to be pure" in inv.property
                     for inv in invs
                 )
                 if not has_purity:

@@ -216,6 +216,102 @@ class TestCollectMutations:
         bar_lines = {s.line for s in bar_sites}
         assert not (foo_lines & bar_lines), "Mutation sites bleed between functions"
 
+    def test_condition_negate_if(self):
+        """if x > 0: should produce a condition_negate mutation."""
+        source = "def f(x):\n    if x > 0:\n        return 1\n    return 0\n"
+        by_op = self._sites_by_op(source)
+        neg = by_op.get(MutationOperator.condition_negate.value, [])
+        assert neg, "Expected condition_negate sites for if statement"
+        assert any("not (" in s.mutated for s in neg)
+
+    def test_condition_negate_while(self):
+        """while condition: should produce a condition_negate mutation."""
+        source = textwrap.dedent("""\
+            def f(n):
+                i = 0
+                while i < n:
+                    i += 1
+                return i
+        """)
+        by_op = self._sites_by_op(source)
+        neg = by_op.get(MutationOperator.condition_negate.value, [])
+        assert neg, "Expected condition_negate sites for while statement"
+        assert any("not (" in s.mutated for s in neg)
+
+    def test_condition_negate_produces_valid_syntax(self):
+        source = "def f(x):\n    if x > 0:\n        return x\n    return 0\n"
+        funcs = _parse_funcs(PythonAdapter(), source)
+        sites = collect_mutations(funcs[0])
+        neg_sites = [s for s in sites if s.operator == MutationOperator.condition_negate]
+        assert neg_sites
+        for s in neg_sites:
+            assert _is_valid_mutation(source, s), f"Invalid syntax after condition_negate: {s}"
+
+    def test_exception_swallow_raise_to_pass(self):
+        """raise X should produce an exception_swallow mutation."""
+        source = textwrap.dedent("""\
+            def f(x):
+                if x < 0:
+                    raise ValueError("negative")
+                return x
+        """)
+        by_op = self._sites_by_op(source)
+        swallow = by_op.get(MutationOperator.exception_swallow.value, [])
+        assert swallow, "Expected exception_swallow site for raise statement"
+        assert all(s.mutated == "pass" for s in swallow)
+
+    def test_exception_swallow_produces_valid_syntax(self):
+        source = textwrap.dedent("""\
+            def f(x):
+                if x < 0:
+                    raise ValueError("bad")
+                return x
+        """)
+        funcs = _parse_funcs(PythonAdapter(), source)
+        sites = collect_mutations(funcs[0])
+        swallow_sites = [s for s in sites if s.operator == MutationOperator.exception_swallow]
+        assert swallow_sites
+        for s in swallow_sites:
+            assert _is_valid_mutation(source, s), f"Invalid syntax after exception_swallow: {s}"
+
+    def test_statement_delete_assignment(self):
+        """x = expr should produce a statement_delete mutation."""
+        source = textwrap.dedent("""\
+            def f(a, b):
+                result = a + b
+                return result
+        """)
+        by_op = self._sites_by_op(source)
+        delete = by_op.get(MutationOperator.statement_delete.value, [])
+        assert delete, "Expected statement_delete site for assignment"
+        assert all(s.mutated == "pass" for s in delete)
+
+    def test_statement_delete_aug_assign(self):
+        """x += expr should produce a statement_delete mutation."""
+        source = textwrap.dedent("""\
+            def f(n):
+                total = 0
+                total += n
+                return total
+        """)
+        by_op = self._sites_by_op(source)
+        delete = by_op.get(MutationOperator.statement_delete.value, [])
+        assert any("+=" in s.original for s in delete), "Expected aug-assign deletion"
+
+    def test_statement_delete_produces_valid_syntax(self):
+        source = textwrap.dedent("""\
+            def f(a, b):
+                x = a + b
+                y = x * 2
+                return y
+        """)
+        funcs = _parse_funcs(PythonAdapter(), source)
+        sites = collect_mutations(funcs[0])
+        del_sites = [s for s in sites if s.operator == MutationOperator.statement_delete]
+        assert del_sites
+        for s in del_sites:
+            assert _is_valid_mutation(source, s), f"Invalid syntax after statement_delete: {s}"
+
 
 # ---------------------------------------------------------------------------
 # Generator / special-form skipping

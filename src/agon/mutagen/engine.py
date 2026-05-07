@@ -89,6 +89,20 @@ _OPERATOR_TO_CATEGORIES: dict[MutationOperator, set[InvariantCategory]] = {
         InvariantCategory.type_constraint,
         InvariantCategory.value_domain,
     },
+    MutationOperator.condition_negate: {
+        InvariantCategory.precondition,
+        InvariantCategory.postcondition,
+        InvariantCategory.relational,
+    },
+    MutationOperator.exception_swallow: {
+        InvariantCategory.exception,
+        InvariantCategory.postcondition,
+    },
+    MutationOperator.statement_delete: {
+        InvariantCategory.postcondition,
+        InvariantCategory.relational,
+        InvariantCategory.value_domain,
+    },
 }
 
 

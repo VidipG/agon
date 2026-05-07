@@ -28,13 +28,6 @@ from .base import FunctionNode, LanguageAdapter, TestAssertion, TestResult, Type
 _PY_LANGUAGE = Language(_tsp.language())
 _PARSER = Parser(_PY_LANGUAGE)
 
-_IO_CALL_NAMES = frozenset({
-    "open", "print", "input", "read", "write", "readline", "readlines",
-    "requests", "httpx", "aiohttp", "urllib",
-    "os", "subprocess", "socket", "sleep", "system",
-})
-
-
 # ---------------------------------------------------------------------------
 # Public adapter
 # ---------------------------------------------------------------------------
@@ -144,14 +137,47 @@ class PythonAdapter:
                 env=env,
             )
             elapsed_ms = int((time.monotonic() - t0) * 1000)
-            return TestResult(
-                passed=proc.returncode == 0,
-                stdout=proc.stdout,
-                stderr=proc.stderr,
-                duration_ms=elapsed_ms,
-                killed_mutant=proc.returncode != 0,
-                timed_out=False,
-            )
+            if proc.returncode == 0:
+                return TestResult(
+                    passed=True,
+                    stdout=proc.stdout,
+                    stderr=proc.stderr,
+                    duration_ms=elapsed_ms,
+                    killed_mutant=False,
+                    timed_out=False,
+                )
+            elif proc.returncode == 1:
+                # pytest exit 1: tests were collected and at least one failed
+                return TestResult(
+                    passed=False,
+                    stdout=proc.stdout,
+                    stderr=proc.stderr,
+                    duration_ms=elapsed_ms,
+                    killed_mutant=True,
+                    timed_out=False,
+                )
+            elif proc.returncode == 5:
+                # pytest exit 5: no tests were collected — not a kill signal
+                return TestResult(
+                    passed=False,
+                    stdout=proc.stdout,
+                    stderr=proc.stderr,
+                    duration_ms=elapsed_ms,
+                    killed_mutant=False,
+                    timed_out=False,
+                    error_message="pytest: no tests collected (exit 5)",
+                )
+            else:
+                # exit 2 (interrupted), 3 (internal error), 4 (cmdline error)
+                return TestResult(
+                    passed=False,
+                    stdout=proc.stdout,
+                    stderr=proc.stderr,
+                    duration_ms=elapsed_ms,
+                    killed_mutant=False,
+                    timed_out=False,
+                    error_message=f"pytest error: exit code {proc.returncode}",
+                )
         except subprocess.TimeoutExpired:
             elapsed_ms = int((time.monotonic() - t0) * 1000)
             return TestResult(

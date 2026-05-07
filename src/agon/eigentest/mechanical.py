@@ -31,6 +31,14 @@ _IO_CALL_NAMES = frozenset({
     "sleep", "system", "popen",
 })
 
+# In-place mutation method names — calling these on a mutable object means the
+# function mutates its argument, which is an observable side effect.
+_MUTATING_METHOD_NAMES = frozenset({
+    "append", "extend", "insert", "remove", "pop", "clear",
+    "update", "setdefault", "add", "discard",
+    "sort", "reverse",
+})
+
 _MUTABLE_DEFAULT_TYPES = frozenset({
     "list", "dict", "set",
     "[",    # list literal
@@ -97,7 +105,10 @@ def _invariant_from_return_type(ref: FunctionRef, ann: str) -> Invariant | None:
 
     # Optional[X] / X | None — result may be None
     if ann.startswith("Optional[") or " | None" in ann or "None |" in ann:
-        inner = ann.replace("Optional[", "").rstrip("]").replace(" | None", "").replace("None | ", "").strip()
+        if ann.startswith("Optional[") and ann.endswith("]"):
+            inner = ann[len("Optional["):-1]
+        else:
+            inner = ann.replace(" | None", "").replace("None | ", "").strip()
         prop = f"returns {inner} or None"
         code = f"assert result is None or isinstance(result, {_annotation_to_type(inner)})"
         return _make_invariant(
@@ -193,11 +204,13 @@ def _extract_assert_invariants(func: FunctionNode) -> list[Invariant]:
             if text.strip() in ("assert True", "assert 1", "assert 1 == 1"):
                 continue
             # Determine if this is a precondition (on a param) or postcondition (on result/return)
+            import re as _re
             category = InvariantCategory.precondition
             param_names = {p for p, _ in func.params}
-            if any(name in text for name in ("result", "output", "ret", "rv")):
+            _RESULT_NAMES = ("result", "output", "ret", "rv")
+            if any(_re.search(r"\b" + n + r"\b", text) for n in _RESULT_NAMES):
                 category = InvariantCategory.postcondition
-            elif not any(pname in text for pname in param_names):
+            elif not any(_re.search(r"\b" + _re.escape(pname) + r"\b", text) for pname in param_names):
                 category = InvariantCategory.postcondition
 
             invariants.append(_make_invariant(
@@ -235,17 +248,11 @@ def _extract_return_value_invariants(func: FunctionNode) -> list[Invariant]:
         return []
 
     # Check if all are literals (integers, strings, True/False/None)
-    _LITERAL_TYPES = frozenset({
-        "integer", "float", "string",
-        "true", "false", "none",
-        "True", "False", "None",
-    })
-
     all_literal = all(
         _is_literal_node(func, rv) for rv in return_values
     )
 
-    if not all_literal or len(set(return_values)) < 2:
+    if not all_literal or len(set(return_values)) < 1:
         return []
 
     values_repr = ", ".join(sorted(set(return_values)))
@@ -323,15 +330,31 @@ def _extract_exception_invariants(func: FunctionNode) -> list[Invariant]:
 
 
 def _parse_raise_type(text: str) -> str | None:
-    """Extract the exception class name from a raise statement."""
+    """Extract the exception class name from a raise statement.
+
+    Handles:
+      - ``raise ValueError(...)``           → "ValueError"
+      - ``raise module.MyException(...)``   → "MyException"
+      - ``raise ValueError``                → "ValueError"
+      - ``raise`` (bare re-raise)           → None
+      - ``raise e`` (variable)              → None (cannot determine type statically)
+    """
     text = text.removeprefix("raise").strip()
-    if not text or text == "":
+    if not text:
         return None
-    # "ValueError(...)" → "ValueError"
-    name = text.split("(")[0].split(".")[0].strip()
-    if name.isidentifier():
-        return name
-    return None
+    # Strip call arguments: "ValueError('msg')" → "ValueError"
+    name_part = text.split("(")[0].strip()
+    # Take the last segment of a dotted path: "module.MyException" → "MyException"
+    name = name_part.split(".")[-1].strip()
+    if not name or not name.isidentifier():
+        return None
+    # Heuristic: exception classes are PascalCase or end with 'Error'/'Warning'/'Exception'.
+    # A single lowercase name without those suffixes is almost certainly a variable re-raise.
+    if name[0].islower() and not any(
+        name.endswith(suffix) for suffix in ("Error", "Warning", "Exception", "Exit")
+    ):
+        return None
+    return name
 
 
 def _find_enclosing_condition(func: FunctionNode, raise_node: Node) -> str | None:
@@ -382,11 +405,14 @@ def _extract_purity_invariant(
             call_text = func.source_bytes[node.start_byte: node.end_byte].decode("utf-8", errors="replace")
             func_part = call_text.split("(")[0].strip()
             name_parts = func_part.split(".")
+            leaf = name_parts[-1]
             # Direct I/O name match
             if any(part in _IO_CALL_NAMES for part in name_parts):
                 return None
+            # Mutating method call on an object (e.g. lst.append(x))
+            if len(name_parts) > 1 and leaf in _MUTATING_METHOD_NAMES:
+                return None
             # Same-file transitive: leaf name is a known-impure function
-            leaf = name_parts[-1]
             if leaf in known_impure:
                 impure_callee = leaf
 

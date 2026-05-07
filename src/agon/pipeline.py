@@ -22,7 +22,7 @@ from .adapters.base import LanguageAdapter
 from .adapters.factory import resolve_adapter
 from .config import AgonConfig, load_config
 from .eigentest.engine import EigentestEngine, EigentestResult
-from .models.schema import AgonReport, Mutation, MutationStatus, ReportSummary
+from .models.schema import AgonReport, Counterexample, Mutation, MutationStatus, ReportSummary
 from .triggers.base import RunRequest
 
 
@@ -34,15 +34,22 @@ def run(request: RunRequest) -> AgonReport:
 
     if request.mode in ("eigentest", "bootstrap"):
         eigen = _run_eigentest(request, cfg, adapter, project_root)
-        return _build_report(request, eigen, mutations=[], project_root=project_root)
+        report = _build_report(request, eigen, mutations=[], project_root=project_root)
 
-    if request.mode in ("mutagen", "analyze", "diff"):
-        return _run_mutagen_pipeline(request, cfg, adapter, project_root)
+    elif request.mode in ("mutagen", "analyze", "diff", "spectre"):
+        report = _run_mutagen_pipeline(request, cfg, adapter, project_root)
 
-    raise NotImplementedError(
-        f"Mode '{request.mode}' is not yet implemented. "
-        "Available: eigentest, mutagen, analyze, diff, bootstrap"
-    )
+    else:
+        raise NotImplementedError(
+            f"Mode '{request.mode}' is not yet implemented. "
+            "Available: eigentest, mutagen, analyze, diff, bootstrap"
+        )
+
+    if request.report_path is not None:
+        from .store import save_report
+        save_report(report, request.report_path)
+
+    return report
 
 
 # ---------------------------------------------------------------------------
@@ -55,10 +62,11 @@ def _run_eigentest(
     cfg: AgonConfig,
     adapter: LanguageAdapter,
     project_root: Path,
+    paths_override: list[Path] | None = None,
 ) -> EigentestResult:
     engine = EigentestEngine(adapter=adapter)
     return engine.run(
-        paths=request.scope.paths,
+        paths=paths_override if paths_override is not None else request.scope.paths,
         functions_filter=request.scope.functions or None,
         project_root=project_root,
     )
@@ -78,8 +86,11 @@ def _run_mutagen_pipeline(
     from .mutagen.engine import MutagenEngine
     from .sandbox.process import SandboxRunner
 
+    # Diff mode: narrow analysis to changed files only
+    analysis_paths = _resolve_diff_paths(request, adapter, project_root)
+
     # Phase 1: invariant extraction
-    eigen = _run_eigentest(request, cfg, adapter, project_root)
+    eigen = _run_eigentest(request, cfg, adapter, project_root, paths_override=analysis_paths)
 
     # Phase 2: mutation generation
     mutagen_engine = MutagenEngine(adapter=adapter)
@@ -89,21 +100,70 @@ def _run_mutagen_pipeline(
         config=cfg,
     )
 
-    # Phase 3: sandbox execution
+    # Phase 3: incremental filter (skip sandbox for unchanged functions)
+    mutations_to_run = mutagen_result.mutations
+    carried_over: list[Mutation] = []
+
+    if request.cache_path is not None and request.cache_path.exists():
+        from .store import incremental_filter, load_report
+        try:
+            prior = load_report(request.cache_path)
+            _, mutations_to_run, carried_over = incremental_filter(
+                eigen.functions, mutagen_result.mutations, prior
+            )
+        except Exception as exc:  # noqa: BLE001
+            import logging
+            logging.getLogger(__name__).warning(
+                "pipeline: failed to load cache %s (%s) — running full analysis",
+                request.cache_path, exc,
+            )
+
+    # Phase 4: sandbox execution (only for changed/new functions)
     runner = SandboxRunner(adapter=adapter, config=cfg)
     sandbox_result = runner.run(
-        mutations=mutagen_result.mutations,
+        mutations=mutations_to_run,
         functions=eigen.functions,
         project_root=project_root,
     )
 
+    all_mutations = sandbox_result.mutations + carried_over
+
+    # Phase 5: spectre — mechanical counterexample generation
+    from .spectre.engine import SpectreEngine
+    survived = [m for m in all_mutations if m.status == MutationStatus.survived]
+    spectre_result = SpectreEngine().run(survived, eigen.functions, eigen.invariants)
+
     return _build_report(
         request,
         eigen,
-        mutations=sandbox_result.mutations,
+        mutations=all_mutations,
+        counterexamples=spectre_result.counterexamples,
         project_root=project_root,
         baseline_failures=sandbox_result.baseline_failures,
     )
+
+
+# ---------------------------------------------------------------------------
+# Diff-mode path resolution
+# ---------------------------------------------------------------------------
+
+
+def _resolve_diff_paths(
+    request: RunRequest,
+    adapter: LanguageAdapter,
+    project_root: Path,
+) -> list[Path] | None:
+    """Return narrowed file list for diff mode, or None for full analysis."""
+    if request.mode != "diff":
+        return None
+
+    from .triggers.git_scope import changed_files, filter_to_scope
+    changed = changed_files(project_root, request.scope.git_base)
+    if not changed:
+        return None  # nothing changed → full analysis
+
+    scoped = filter_to_scope(changed, request.scope.paths, adapter.source_extensions())
+    return scoped
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +176,7 @@ def _build_report(
     eigen: EigentestResult,
     mutations: list[Mutation],
     project_root: Path,
+    counterexamples: list[Counterexample] | None = None,
     baseline_failures: list[str] | None = None,
 ) -> AgonReport:
     # Invariant source breakdown
@@ -131,6 +192,8 @@ def _build_report(
     scoreable = killed + survived  # exclude equivalent, timeout, error, pending
     score = (killed / scoreable) if scoreable > 0 else 0.0
 
+    cxs = counterexamples or []
+
     summary = ReportSummary(
         functions_analyzed=len(eigen.functions),
         invariants_inferred=len(eigen.invariants),
@@ -140,6 +203,7 @@ def _build_report(
         mutations_survived=survived,
         mutations_equivalent=equivalent,
         mutation_score=score,
+        counterexamples_found=len(cxs),
     )
 
     return AgonReport(
@@ -147,6 +211,7 @@ def _build_report(
         scope=[str(p) for p in request.scope.paths],
         invariants=eigen.invariants,
         mutations=mutations,
+        counterexamples=cxs,
         summary=summary,
     )
 

@@ -81,8 +81,11 @@ class RunRequest(BaseModel):
         "bootstrap",    # generate initial test file for unannotated code
     ] = "analyze"
     output_format: Literal["terminal", "json", "sarif", "markdown"] = "terminal"
-    iterate: bool = False       # enable closed feedback loop (multiple passes)
-    dry_run: bool = False       # plan what would run without executing
+    iterate: bool = False           # enable closed feedback loop (multiple passes)
+    dry_run: bool = False           # plan what would run without executing
+    report_path: Path | None = None # save AgonReport JSON to this path after the run
+    cache_path: Path | None = None  # load a prior AgonReport for incremental mutation runs
+    fail_under: float | None = None # exit non-zero if mutation score is below this (0.0–1.0)
 
 
 class TriggerAdapter(Protocol):

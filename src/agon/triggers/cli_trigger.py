@@ -40,6 +40,9 @@ class CLITrigger:
         iterate: bool = False,
         dry_run: bool = False,
         functions: list[str] | None = None,
+        report_path: Path | None = None,
+        cache_path: Path | None = None,
+        fail_under: float | None = None,
         registry: SpecRefRegistry | None = None,
     ) -> None:
         self._paths = paths
@@ -51,6 +54,9 @@ class CLITrigger:
         self._iterate = iterate
         self._dry_run = dry_run
         self._functions = functions or []
+        self._report_path = report_path
+        self._cache_path = cache_path
+        self._fail_under = fail_under
         self._registry = registry or SpecRefRegistry.default()
 
     def parse(self) -> RunRequest:
@@ -68,4 +74,7 @@ class CLITrigger:
             output_format=self._output,  # type: ignore[arg-type]
             iterate=self._iterate,
             dry_run=self._dry_run,
+            report_path=self._report_path,
+            cache_path=self._cache_path,
+            fail_under=self._fail_under,
         )

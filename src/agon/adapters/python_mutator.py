@@ -125,6 +125,15 @@ class _MutationCollector(cst.CSTVisitor):
     def visit_Divide(self, node: cst.Divide) -> None:
         self._add(node, "/", "*", MutationOperator.arithmetic_swap)
 
+    def visit_FloorDivide(self, node: cst.FloorDivide) -> None:
+        self._add(node, "//", "/", MutationOperator.arithmetic_swap)
+
+    def visit_Modulo(self, node: cst.Modulo) -> None:
+        self._add(node, "%", "+", MutationOperator.arithmetic_swap)
+
+    def visit_Power(self, node: cst.Power) -> None:
+        self._add(node, "**", "*", MutationOperator.arithmetic_swap)
+
     # ------------------------------------------------------------------
     # Comparison operators  (inside ComparisonTarget.operator)
     # ------------------------------------------------------------------
@@ -162,18 +171,32 @@ class _MutationCollector(cst.CSTVisitor):
     # ------------------------------------------------------------------
 
     def visit_Name(self, node: cst.Name) -> None:
-        """True ↔ False."""
+        """True ↔ False; None → 0."""
         replacement = _BOOL_LITERAL_SWAPS.get(node.value)
         if replacement is not None:
             self._add(node, node.value, replacement, MutationOperator.constant_replace)
+        elif node.value == "None":
+            self._add(node, "None", "0", MutationOperator.constant_replace)
 
     def visit_Integer(self, node: cst.Integer) -> None:
-        """Numeric literals: 0 → 1, n → n-1 (keeps sign, avoids zero-division)."""
+        """Numeric literals: 0 → 1, 1 → 2, n → n-1.
+
+        We avoid mutating to 0 from a positive literal to reduce division-by-zero
+        noise: a mutant that crashes with ZeroDivisionError is classified as
+        killed anyway, but it obscures the real test signal and produces
+        confusing counterexample stubs. Mutating 1 → 2 (rather than 1 → 0)
+        keeps the value non-zero while still perturbing the constant.
+        """
         try:
             n = int(node.value)
         except ValueError:
             return
-        replacement = str(n + 1) if n == 0 else str(n - 1)
+        if n == 0:
+            replacement = "1"
+        elif n == 1:
+            replacement = "2"
+        else:
+            replacement = str(n - 1)
         self._add(node, node.value, replacement, MutationOperator.constant_replace)
 
     def visit_SimpleString(self, node: cst.SimpleString) -> None:
@@ -183,6 +206,108 @@ class _MutationCollector(cst.CSTVisitor):
             if raw.startswith(q) and raw.endswith(q) and len(raw) > 2 * len(q):
                 self._add(node, raw, q + q, MutationOperator.constant_replace)
                 break
+
+    # ------------------------------------------------------------------
+    # Condition negation  (if / while test expressions)
+    # ------------------------------------------------------------------
+
+    def _negate_condition(self, test_node: cst.CSTNode) -> None:
+        """Emit a condition_negate site for a single-line test expression."""
+        if not self._in_range(test_node):
+            return
+        pos = self.get_metadata(PositionProvider, test_node)
+        if pos.start.line != pos.end.line:
+            return  # skip multi-line conditions
+        col_start = pos.start.column
+        col_end = pos.end.column
+        if col_start >= col_end:
+            return
+        original = _source_slice(self._source_lines, pos.start.line, col_start, col_end)
+        if not original:
+            return
+        self.sites.append(MutationSite(
+            line=pos.start.line,
+            col_start=col_start,
+            col_end=col_end,
+            original=original,
+            mutated=f"not ({original})",
+            operator=MutationOperator.condition_negate,
+        ))
+
+    def visit_If(self, node: cst.If) -> None:
+        self._negate_condition(node.test)
+
+    def visit_While(self, node: cst.While) -> None:
+        # Skip while True / while False — negation produces unreachable bodies
+        # or infinite-loop inversions that don't meaningfully test logic.
+        if isinstance(node.test, cst.Name) and node.test.value in ("True", "False"):
+            return
+        self._negate_condition(node.test)
+
+    # ------------------------------------------------------------------
+    # Exception swallow  (raise X → pass)
+    # ------------------------------------------------------------------
+
+    def visit_Raise(self, node: cst.Raise) -> None:
+        """Replace raise with pass, swallowing the exception."""
+        if not self._in_range(node):
+            return
+        pos = self.get_metadata(PositionProvider, node)
+        if pos.start.line != pos.end.line:
+            return
+        col_start = pos.start.column
+        col_end = pos.end.column
+        if col_start >= col_end:
+            return
+        original = _source_slice(self._source_lines, pos.start.line, col_start, col_end)
+        if not original:
+            return
+        self.sites.append(MutationSite(
+            line=pos.start.line,
+            col_start=col_start,
+            col_end=col_end,
+            original=original,
+            mutated="pass",
+            operator=MutationOperator.exception_swallow,
+        ))
+
+    # ------------------------------------------------------------------
+    # Statement deletion  (assignment → pass)
+    # ------------------------------------------------------------------
+
+    def _delete_statement(self, node: cst.CSTNode) -> None:
+        """Replace a single-line statement with pass."""
+        if not self._in_range(node):
+            return
+        pos = self.get_metadata(PositionProvider, node)
+        if pos.start.line != pos.end.line:
+            return  # skip multi-line statements
+        col_start = pos.start.column
+        col_end = pos.end.column
+        if col_start >= col_end:
+            return
+        original = _source_slice(self._source_lines, pos.start.line, col_start, col_end)
+        if not original:
+            return
+        self.sites.append(MutationSite(
+            line=pos.start.line,
+            col_start=col_start,
+            col_end=col_end,
+            original=original,
+            mutated="pass",
+            operator=MutationOperator.statement_delete,
+        ))
+
+    def visit_Assign(self, node: cst.Assign) -> None:
+        self._delete_statement(node)
+
+    def visit_AugAssign(self, node: cst.AugAssign) -> None:
+        self._delete_statement(node)
+
+    def visit_AnnAssign(self, node: cst.AnnAssign) -> None:
+        # Only delete annotated assignments that have a value (x: int = expr)
+        if node.value is not None:
+            self._delete_statement(node)
 
     # ------------------------------------------------------------------
     # Return value replacement

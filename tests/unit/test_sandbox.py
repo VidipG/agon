@@ -362,3 +362,98 @@ class TestSandboxRunnerE2E:
         assert (tmp_path / "lib.py").read_text() == source, (
             "Source file was not restored after mutation run"
         )
+
+
+# ---------------------------------------------------------------------------
+# SandboxRunner: parallel execution
+# ---------------------------------------------------------------------------
+
+
+def _make_parallel_config(workers: int) -> AgonConfig:
+    """Return an AgonConfig with the given parallel_workers setting."""
+    cfg = AgonConfig()
+    cfg.mutagen.parallel_workers = workers
+    return cfg
+
+
+class TestSandboxRunnerParallel:
+    """Verify that parallel_workers > 1 produces the same results as serial."""
+
+    def _setup_project(self, tmp_path: Path, source: str, test_source: str) -> Path:
+        (tmp_path / "lib.py").write_text(source)
+        (tmp_path / "test_lib.py").write_text(test_source)
+        return tmp_path
+
+    def _run_with_workers(self, tmp_path: Path, workers: int):
+        source = "def add(a, b):\n    return a + b\n"
+        tests = "from lib import add\ndef test_add():\n    assert add(2, 3) == 5\n"
+        self._setup_project(tmp_path, source, tests)
+        adapter = PythonAdapter()
+        eigen = EigentestEngine(adapter=adapter).run([tmp_path / "lib.py"], project_root=tmp_path)
+        mutagen = MutagenEngine(adapter=adapter)
+        mutagen_result = mutagen.run(eigen.functions, eigen.invariants, AgonConfig())
+        cfg = _make_parallel_config(workers)
+        runner = SandboxRunner(adapter=adapter, config=cfg)
+        return runner.run(mutagen_result.mutations, eigen.functions, tmp_path)
+
+    def test_parallel_kills_same_mutations_as_serial(self, tmp_path: Path):
+        """Parallel and serial runs must agree on which mutations are killed."""
+        (tmp_path / "serial").mkdir()
+        (tmp_path / "parallel").mkdir()
+        serial_result = self._run_with_workers(tmp_path / "serial", workers=1)
+        parallel_result = self._run_with_workers(tmp_path / "parallel", workers=4)
+
+        serial_killed = {m.id for m in serial_result.killed}
+        parallel_killed = {m.id for m in parallel_result.killed}
+        # IDs won't match across independent runs (different function hashes),
+        # but counts and operators should match.
+        serial_ops = sorted(m.operator.value for m in serial_result.killed)
+        parallel_ops = sorted(m.operator.value for m in parallel_result.killed)
+        assert serial_ops == parallel_ops, (
+            f"Parallel killed operators {parallel_ops} differ from serial {serial_ops}"
+        )
+
+    def test_parallel_source_not_corrupted(self, tmp_path: Path):
+        """Source file must be unchanged after a parallel run."""
+        source = "def add(a, b):\n    return a + b\n"
+        tests = "from lib import add\ndef test_add():\n    assert add(1, 2) == 3\n"
+        self._setup_project(tmp_path, source, tests)
+        adapter = PythonAdapter()
+        eigen = EigentestEngine(adapter=adapter).run([tmp_path / "lib.py"], project_root=tmp_path)
+        mutagen = MutagenEngine(adapter=adapter)
+        mutagen_result = mutagen.run(eigen.functions, eigen.invariants, AgonConfig())
+        cfg = _make_parallel_config(4)
+        runner = SandboxRunner(adapter=adapter, config=cfg)
+        runner.run(mutagen_result.mutations, eigen.functions, tmp_path)
+        assert (tmp_path / "lib.py").read_text() == source
+
+    def test_parallel_baseline_failure_marks_errors(self, tmp_path: Path):
+        """Baseline failure in parallel mode must still mark all mutants as error."""
+        source = "def f(x):\n    return x + 1\n"
+        tests = "from lib import f\ndef test_broken():\n    assert f(1) == 999\n"
+        self._setup_project(tmp_path, source, tests)
+        adapter = PythonAdapter()
+        eigen = EigentestEngine(adapter=adapter).run([tmp_path / "lib.py"], project_root=tmp_path)
+        mutagen = MutagenEngine(adapter=adapter)
+        mutagen_result = mutagen.run(eigen.functions, eigen.invariants, AgonConfig())
+        cfg = _make_parallel_config(4)
+        runner = SandboxRunner(adapter=adapter, config=cfg)
+        result = runner.run(mutagen_result.mutations, eigen.functions, tmp_path)
+        assert "f" in result.baseline_failures
+        for m in result.mutations:
+            assert m.status == MutationStatus.error
+
+    def test_workers_1_uses_serial_path(self, tmp_path: Path, monkeypatch):
+        """parallel_workers=1 must not create a thread pool."""
+        import concurrent.futures
+        pool_created = []
+        original_init = concurrent.futures.ThreadPoolExecutor.__init__
+
+        def tracking_init(self_inner, *args, **kwargs):
+            pool_created.append(True)
+            return original_init(self_inner, *args, **kwargs)
+
+        monkeypatch.setattr(concurrent.futures.ThreadPoolExecutor, "__init__", tracking_init)
+
+        self._run_with_workers(tmp_path, workers=1)
+        assert not pool_created, "ThreadPoolExecutor should not be created for workers=1"
