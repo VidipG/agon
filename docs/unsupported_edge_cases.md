@@ -1,6 +1,6 @@
 # Unsupported Edge Cases & Future Refinements
 
-This document tracks identified architectural gaps and edge cases in the current Agon implementation (as of May 2026). Items marked **Supported** have been resolved; items marked **Planned** have a documented resolution path; items marked **Open** have no current fix.
+This document tracks identified architectural gaps and edge cases in the current Agon implementation. Items marked **Supported** have been resolved; items marked **Planned** have a documented resolution path; items marked **Open** have no current fix.
 
 ---
 
@@ -67,11 +67,11 @@ This document tracks identified architectural gaps and edge cases in the current
 
 ## 7. Thread Safety under Parallel Execution
 
-**Current Behavior:** `SandboxRunner._run_parallel` uses `ThreadPoolExecutor`. The test-selection cache (`_test_selection_cache`) is populated serially before workers start, so cache reads during parallel execution are pure and thread-safe under CPython's GIL. `SandboxResult.baseline_failures` is appended only from the main thread after `as_completed` collects each baseline future.
+**Current Behavior:** `SandboxRunner._run_parallel` uses `ThreadPoolExecutor`. The test-selection cache (`_test_selection_cache`) is populated serially before workers start, so cache reads during parallel execution are pure and thread-safe under CPython's GIL. The baseline cache (`_baseline_cache`) is also populated from the main thread via `as_completed`. `SandboxResult.baseline_failures` is appended only from the main thread after `as_completed` collects each baseline future.
 
 **Status:** **Supported** for the current implementation. The following patterns would break thread safety and must be avoided when extending `SandboxRunner`:
 
-- Mutating `_test_selection_cache` from within a worker function (would race with other workers reading the same dict).
+- Mutating `_test_selection_cache` or `_baseline_cache` from within a worker function (would race with other workers reading the same dict).
 - Appending to `result.mutations` or `result.baseline_failures` from inside a `pool.submit` callback (currently avoided; all appends happen in the main thread via `as_completed`).
 - Sharing a single `TemporaryDirectory` across workers (currently impossible since `_run_one` creates its own via `_copy_sandbox`).
 
@@ -91,7 +91,7 @@ If `parallel_workers` is extended to use a `ProcessPoolExecutor` (for true paral
 
 ## 9. Incremental Cache Staleness
 
-**Current Behavior:** The incremental filter identifies unchanged functions by comparing `(file, name, content_hash)` where `content_hash = sha256(function_body)`. Prior mutation results are carried over when the hash matches.
+**Current Behavior:** The incremental filter identifies unchanged functions by comparing `(file, name, content_hash)` where `content_hash = sha256(function_body)`. Prior mutation results are carried over when the hash matches. Only terminal-status mutations (`killed`, `survived`, `equivalent`, `timeout`, `error`) are carried over; `pending` mutations from interrupted runs are excluded.
 
 **Impact:**
 
@@ -100,3 +100,25 @@ If `parallel_workers` is extended to use a `ProcessPoolExecutor` (for true paral
 - **Config changes:** If `MutagenConfig.max_mutants_per_function` or the operator set changes, the cached mutations may be a different subset than what the current configuration would generate.
 
 **Status:** Open by design — the cache is intentionally conservative. Correct behavior: run `agon analyze` without `--cache` periodically (e.g., on every merge to main) to ensure a fresh ground-truth baseline. Use `--cache` only for PR-scoped incremental runs where the assumption of stable dependencies holds.
+
+---
+
+## 10. pytest Exit Code Classification
+
+**Current Behavior:** `run_tests` now correctly distinguishes pytest exit codes:
+- Exit 0: tests passed → `killed_mutant=False`
+- Exit 1: tests collected and at least one failed → `killed_mutant=True`
+- Exit 5: no tests collected → `error_message` set, `killed_mutant=False`
+- Exit 2/3/4: internal/interrupt/cmdline error → `error_message` set, `killed_mutant=False`
+
+**Status:** **Supported.** Prior to this fix, exit 5 was classified as `killed_mutant=True`, producing false kills for mutants in functions with no matching test files. The test-selection heuristic (grep for function name) can return an empty match, causing pytest to find no tests when invoked with a filtered file list. This now correctly yields `MutationStatus.error` via `_classify`.
+
+---
+
+## 11. Purity: Mutating Method Calls
+
+**Current Behavior:** The purity detector now checks for in-place mutating method calls (`.append()`, `.extend()`, `.insert()`, `.remove()`, `.pop()`, `.clear()`, `.update()`, `.setdefault()`, `.add()`, `.discard()`, `.sort()`, `.reverse()`). Any call of the form `obj.method(...)` where `method` is in `_MUTATING_METHOD_NAMES` causes the function to be classified as impure.
+
+**Impact (before fix):** Functions that mutated their arguments via in-place methods were incorrectly claimed to be pure, producing false purity invariants.
+
+**Status:** **Supported.** The check requires a dotted call (`len(name_parts) > 1`) to avoid false positives on top-level functions that happen to share a name with a mutating method (e.g., a module-level `sort()` helper). Cross-module calls remain untraced (see §4).
